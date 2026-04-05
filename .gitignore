@@ -2,7 +2,9 @@ node_modules/
 dist/
 venv/
 __pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
 .env
 backend/.env
 frontend/.env
