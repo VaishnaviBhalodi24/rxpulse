@@ -2,7 +2,6 @@ services:
   - type: web
     name: rxpulse-backend
     runtime: python
-    plan: individual
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     rootDir: backend
@@ -17,7 +16,6 @@ services:
   - type: web
     name: rxpulse-frontend
     runtime: node
-    plan: individual
     buildCommand: npm install && npm run build
     startCommand: npx serve dist -s -l $PORT
     rootDir: frontend
