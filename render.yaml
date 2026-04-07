@@ -2,7 +2,7 @@ services:
   - type: web
     name: rxpulse-backend
     runtime: python
-    plan: free
+    plan: individual
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     rootDir: backend
@@ -14,10 +14,8 @@ services:
       - key: SUPABASE_KEY
         sync: false
 
-  - type: web
+  - type: static_site
     name: rxpulse-frontend
-    runtime: static
-    plan: free
     buildCommand: npm install && npm run build
     staticPublishPath: dist
     rootDir: frontend
