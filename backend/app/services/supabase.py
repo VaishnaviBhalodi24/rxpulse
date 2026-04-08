@@ -215,7 +215,7 @@ class SupabaseService:
                 "drug_name": c.get("drug_name"),
                 "section_type": c.get("section_type", "general"),
                 "page_number": c.get("page_number"),
-                "metadata": c.get("metadata") or {},
+                "metadata": {**(c.get("metadata") or {}), "indications": c.get("indications", [])},
             }
             if c.get("embedding"):
                 row["embedding"] = c["embedding"]
@@ -314,9 +314,29 @@ class SupabaseService:
                     seen_ids.add(r.get("id"))
 
         rows = self._filter_to_latest_chunk_rows(rows)
+
+        # Score chunks: prioritize those matching indications in the question
+        q_lower = question.lower()
+        def _chunk_score(r):
+            score = 0
+            # Prefer non-general sections (coverage, indications)
+            if r.get("section_type") not in ("general", None):
+                score += 3
+            # Prefer chunks with drug name match
+            if r.get("drug_name") or ((r.get("metadata") or {}).get("matched_alias")):
+                score += 2
+            # Prefer chunks whose indications match the question
+            chunk_indications = (r.get("metadata") or {}).get("indications") or []
+            for ind in chunk_indications:
+                if ind in q_lower:
+                    score += 5  # Strong signal
+            # Prefer coverage sections for criteria questions
+            if r.get("section_type") == "coverage":
+                score += 1
+            return -score  # negative for ascending sort
+
         rows.sort(key=lambda r: (
-            0 if r.get("section_type") != "general" else 1,
-            0 if (r.get("drug_name") or ((r.get("metadata") or {}).get("matched_alias"))) else 1,
+            _chunk_score(r),
         ))
 
         if not rows:

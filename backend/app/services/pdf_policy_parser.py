@@ -7,6 +7,14 @@ from typing import Dict, Iterable, List, Optional
 
 import pdfplumber
 
+# Optional OCR support for scanned PDFs
+try:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
 
 LOW_VALUE_SECTIONS = {"references", "revision_history", "instructions", "evidence_summary"}
 PROGRAM_HIGH_VALUE_SECTIONS = {"coverage", "coding"}
@@ -73,7 +81,51 @@ class PolicyDocument:
 
 def parse_pdf_bytes(file_bytes: bytes, source_name: str = "uploaded.pdf") -> PolicyDocument:
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        return _build_policy_document(pdf.pages, source_name)
+        doc = _build_policy_document(pdf.pages, source_name)
+
+    # If text extraction was poor (scanned PDF), try OCR
+    avg_chars = sum(len(p.text) for p in doc.pages) / max(len(doc.pages), 1)
+    if avg_chars < 100 and OCR_AVAILABLE:
+        try:
+            doc = _ocr_pdf_bytes(file_bytes, source_name)
+        except Exception:
+            pass  # Fall back to pdfplumber result
+
+    return doc
+
+
+def _ocr_pdf_bytes(file_bytes: bytes, source_name: str) -> PolicyDocument:
+    """OCR fallback for scanned PDFs using pytesseract."""
+    images = convert_from_bytes(file_bytes, dpi=300)
+    pages: List[PolicyPage] = []
+    raw_parts: List[str] = []
+
+    for page_number, image in enumerate(images, 1):
+        text = pytesseract.image_to_string(image).strip()
+        if not text:
+            continue
+        section_type = _infer_section_type(text)
+        heading = _extract_heading(text)
+        pages.append(PolicyPage(
+            page_number=page_number,
+            text=text,
+            section_type=section_type,
+            heading=heading,
+        ))
+        raw_parts.append(text)
+
+    if not pages:
+        raise ValueError("OCR found no text in the PDF.")
+
+    title = _extract_title(pages)
+    document_type = _infer_document_type(title, pages)
+    return PolicyDocument(
+        title=title,
+        source_name=source_name,
+        document_type=document_type,
+        pages=pages,
+        raw_text="\n\n".join(raw_parts),
+    )
 
 
 def parse_pdf_path(path: str) -> PolicyDocument:
@@ -81,11 +133,69 @@ def parse_pdf_path(path: str) -> PolicyDocument:
         return _build_policy_document(pdf.pages, path.rsplit("/", 1)[-1])
 
 
+# ---------------------------------------------------------------------------
+# Table extraction
+# ---------------------------------------------------------------------------
+
+def _extract_tables_from_page(page) -> str:
+    """Extract tables from a pdfplumber page and format as readable text."""
+    try:
+        tables = page.extract_tables()
+        if not tables:
+            return ""
+        parts = []
+        for table in tables:
+            if not table:
+                continue
+            # Filter out empty rows
+            rows = [row for row in table if any(cell and cell.strip() for cell in row if cell)]
+            if not rows:
+                continue
+            # Format as aligned text
+            for row in rows:
+                cells = [str(cell or "").strip().replace("\n", " ") for cell in row]
+                parts.append(" | ".join(cells))
+            parts.append("")  # blank line between tables
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Indication detection for chunk tagging
+# ---------------------------------------------------------------------------
+
+KNOWN_INDICATIONS = [
+    "rheumatoid arthritis", "non-hodgkin lymphoma", "chronic lymphocytic leukemia",
+    "granulomatosis with polyangiitis", "microscopic polyangiitis", "pemphigus vulgaris",
+    "multiple sclerosis", "neuromyelitis optica", "lupus nephritis", "membranous nephropathy",
+    "immune thrombocytopenia", "autoimmune hemolytic anemia", "myasthenia gravis",
+    "anti-neutrophil cytoplasmic", "colorectal cancer", "non-small cell lung cancer",
+    "glioblastoma", "renal cell carcinoma", "cervical cancer", "hepatocellular carcinoma",
+    "ovarian cancer", "breast cancer", "gastric cancer", "head and neck cancer",
+    "hodgkin lymphoma", "diffuse large b-cell", "follicular lymphoma", "mantle cell lymphoma",
+    "waldenstrom", "marginal zone lymphoma", "burkitt lymphoma",
+]
+
+
+def detect_indications_in_text(text: str) -> List[str]:
+    """Detect known medical indications mentioned in text."""
+    lower = text.lower()
+    found = []
+    for indication in KNOWN_INDICATIONS:
+        if indication in lower:
+            found.append(indication)
+    return found
+
+
 def build_rag_chunks(document: PolicyDocument, max_chars: int = 5500) -> List[dict]:
+    """Section-aware chunking: break on section boundaries, not just character count.
+    This keeps related criteria together instead of splitting them across chunks."""
     chunks: List[dict] = []
     current_pages: List[int] = []
     current_parts: List[str] = []
     current_sections: List[str] = []
+    current_section_type: Optional[str] = None
     chunk_index = 0
 
     for page in document.pages:
@@ -95,8 +205,18 @@ def build_rag_chunks(document: PolicyDocument, max_chars: int = 5500) -> List[di
         page_block = "Page {0}\n{1}".format(page.page_number, page.text.strip())
         projected_size = sum(len(part) for part in current_parts) + len(page_block)
 
-        if current_parts and projected_size > max_chars:
-            chunks.append(_make_chunk(chunk_index, current_pages, current_parts, current_sections))
+        # Break chunk when: section type changes OR size limit exceeded
+        section_changed = (
+            current_section_type is not None
+            and page.section_type != current_section_type
+            and page.section_type != "general"
+            and current_section_type != "general"
+        )
+
+        if current_parts and (projected_size > max_chars or section_changed):
+            chunk = _make_chunk(chunk_index, current_pages, current_parts, current_sections)
+            chunk["indications"] = detect_indications_in_text(chunk["content"])
+            chunks.append(chunk)
             chunk_index += 1
             current_pages = []
             current_parts = []
@@ -105,14 +225,18 @@ def build_rag_chunks(document: PolicyDocument, max_chars: int = 5500) -> List[di
         current_pages.append(page.page_number)
         current_parts.append(page_block)
         current_sections.append(page.section_type)
+        current_section_type = page.section_type
 
     if current_parts:
-        chunks.append(_make_chunk(chunk_index, current_pages, current_parts, current_sections))
+        chunk = _make_chunk(chunk_index, current_pages, current_parts, current_sections)
+        chunk["indications"] = detect_indications_in_text(chunk["content"])
+        chunks.append(chunk)
 
     return chunks
 
 
 def build_extraction_chunks(document: PolicyDocument, max_chars: int = 6500) -> List[dict]:
+    """Section-aware extraction chunking: break on section boundaries."""
     relevant_pages = [page for page in document.pages if page.section_type not in LOW_VALUE_SECTIONS and page.text.strip()]
     if not relevant_pages:
         relevant_pages = [page for page in document.pages if page.text.strip()]
@@ -121,6 +245,7 @@ def build_extraction_chunks(document: PolicyDocument, max_chars: int = 6500) -> 
     current_pages: List[int] = []
     current_parts: List[str] = []
     current_sections: List[str] = []
+    current_section_type: Optional[str] = None
     chunk_index = 0
 
     for page in relevant_pages:
@@ -131,7 +256,15 @@ def build_extraction_chunks(document: PolicyDocument, max_chars: int = 6500) -> 
         )
         projected_size = sum(len(part) for part in current_parts) + len(page_block)
 
-        if current_parts and projected_size > max_chars:
+        # Break on section change or size limit
+        section_changed = (
+            current_section_type is not None
+            and page.section_type != current_section_type
+            and page.section_type != "general"
+            and current_section_type != "general"
+        )
+
+        if current_parts and (projected_size > max_chars or section_changed):
             chunks.append(_make_chunk(chunk_index, current_pages, current_parts, current_sections))
             chunk_index += 1
             current_pages = []
@@ -141,6 +274,7 @@ def build_extraction_chunks(document: PolicyDocument, max_chars: int = 6500) -> 
         current_pages.append(page.page_number)
         current_parts.append(page_block)
         current_sections.append(page.section_type)
+        current_section_type = page.section_type
 
     if current_parts:
         chunks.append(_make_chunk(chunk_index, current_pages, current_parts, current_sections))
@@ -245,6 +379,10 @@ def _build_policy_document(pdf_pages: Iterable, source_name: str) -> PolicyDocum
 
     for page_number, page in enumerate(pdf_pages, 1):
         text = (page.extract_text() or "").strip()
+        # Extract tables and append structured table text
+        table_text = _extract_tables_from_page(page)
+        if table_text:
+            text = text + "\n\n[TABLE DATA]\n" + table_text
         if not text:
             continue
         section_type = _infer_section_type(text)
