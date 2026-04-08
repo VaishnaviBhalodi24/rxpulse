@@ -834,4 +834,145 @@ def extract_drug_coverages_from_document(document_id: str) -> List[DrugCoverageR
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return [DrugCoverageRead(**row) for row in rows]
+    return [DrugCoverageRead(**row) for row in (rows or [])]
+
+
+# ---------------------------------------------------------------------------
+# Approval Scoring System (inspired by PolicyDiff)
+# ---------------------------------------------------------------------------
+
+class ApprovalScoreRequest(BaseModel):
+    drug: str
+    payer: str
+    diagnosis: str = ""
+    has_step_therapy_history: bool = False
+    has_prior_auth_docs: bool = False
+    is_specialist_prescriber: bool = False
+    previous_treatments: List[str] = []
+
+class ApprovalScoreResponse(BaseModel):
+    drug: str
+    payer: str
+    score: int
+    max_score: int
+    likelihood: str
+    breakdown: List[Dict[str, Any]]
+    recommendation: str
+    pa_memo: Optional[str] = None
+
+@router.post("/approval-score")
+def compute_approval_score(payload: ApprovalScoreRequest) -> ApprovalScoreResponse:
+    supabase = get_supabase_service()
+    coverages = supabase.search_drug_coverages(payload.drug)
+    payer_coverages = [c for c in coverages if payload.payer.lower() in (c.get("payer") or "").lower()]
+    if not payer_coverages:
+        raise HTTPException(status_code=404, detail="No coverage data for {0} with {1}".format(payload.drug, payload.payer))
+    cov = payer_coverages[0]
+    breakdown = []
+    score = 0
+
+    # 1. Coverage status (30 pts)
+    status = cov.get("coverage_status", "unknown")
+    if status == "covered":
+        score += 30
+        breakdown.append({"criterion": "Coverage Status", "points": 30, "max": 30, "status": "met", "detail": "Drug is covered"})
+    elif status == "restricted":
+        score += 15
+        breakdown.append({"criterion": "Coverage Status", "points": 15, "max": 30, "status": "partial", "detail": "Covered with restrictions"})
+    else:
+        breakdown.append({"criterion": "Coverage Status", "points": 0, "max": 30, "status": "unmet", "detail": "Not covered"})
+
+    # 2. Diagnosis match (20 pts)
+    covered_inds = cov.get("covered_indications") or []
+    diag_match = any(payload.diagnosis.lower() in ind.lower() for ind in covered_inds) if payload.diagnosis else False
+    if diag_match:
+        score += 20
+        breakdown.append({"criterion": "Diagnosis Documentation", "points": 20, "max": 20, "status": "met", "detail": "Matches covered indication"})
+    else:
+        breakdown.append({"criterion": "Diagnosis Documentation", "points": 0, "max": 20, "status": "unmet" if payload.diagnosis else "missing", "detail": payload.diagnosis or "Not provided"})
+
+    # 3. Step therapy (25 pts)
+    if not cov.get("step_therapy"):
+        score += 25
+        breakdown.append({"criterion": "Step Therapy", "points": 25, "max": 25, "status": "met", "detail": "Not required"})
+    elif payload.has_step_therapy_history:
+        score += 25
+        breakdown.append({"criterion": "Step Therapy", "points": 25, "max": 25, "status": "met", "detail": "Completed"})
+    else:
+        reqs = cov.get("step_therapy_requirements") or []
+        breakdown.append({"criterion": "Step Therapy", "points": 0, "max": 25, "status": "unmet", "detail": "; ".join(reqs) if reqs else "Required"})
+
+    # 4. Prior auth (15 pts)
+    if not cov.get("prior_authorization"):
+        score += 15
+        breakdown.append({"criterion": "Prior Authorization", "points": 15, "max": 15, "status": "met", "detail": "Not required"})
+    elif payload.has_prior_auth_docs:
+        score += 15
+        breakdown.append({"criterion": "Prior Authorization", "points": 15, "max": 15, "status": "met", "detail": "Docs prepared"})
+    else:
+        criteria = cov.get("prior_auth_criteria") or []
+        breakdown.append({"criterion": "Prior Authorization", "points": 0, "max": 15, "status": "unmet", "detail": "; ".join(criteria) if criteria else "Required"})
+
+    # 5. Prescriber (10 pts)
+    if not cov.get("prescriber_requirements"):
+        score += 10
+        breakdown.append({"criterion": "Prescriber Specialty", "points": 10, "max": 10, "status": "met", "detail": "No restrictions"})
+    elif payload.is_specialist_prescriber:
+        score += 10
+        breakdown.append({"criterion": "Prescriber Specialty", "points": 10, "max": 10, "status": "met", "detail": "Specialist confirmed"})
+    else:
+        breakdown.append({"criterion": "Prescriber Specialty", "points": 0, "max": 10, "status": "unmet", "detail": cov.get("prescriber_requirements")})
+
+    likelihood = "high" if score >= 75 else "moderate" if score >= 50 else "low"
+    recommendation = {
+        "high": "Strong likelihood of approval. Submit PA with supporting documentation.",
+        "moderate": "Moderate likelihood. Address unmet criteria before submission.",
+        "low": "Low likelihood. Consider alternative therapies or appeal strategy.",
+    }[likelihood]
+
+    # Generate PA memo if score >= 50
+    pa_memo = None
+    if score >= 50:
+        try:
+            gemini = GeminiService(get_settings())
+            met = [b["criterion"] for b in breakdown if b["status"] == "met"]
+            unmet = [b["criterion"] for b in breakdown if b["status"] == "unmet"]
+            memo_prompt = "Generate a 200-word prior authorization justification memo for {drug} ({payer}). Diagnosis: {diag}. Score: {score}/100. Met: {met}. Gaps: {unmet}. Professional clinical language.".format(
+                drug=payload.drug, payer=payload.payer, diag=payload.diagnosis or "unspecified",
+                score=score, met=", ".join(met), unmet=", ".join(unmet))
+            pa_memo = gemini._request_text(memo_prompt, temperature=0.3, timeout=60.0)
+        except Exception:
+            pass
+
+    return ApprovalScoreResponse(drug=payload.drug, payer=payload.payer, score=score, max_score=100,
+        likelihood=likelihood, breakdown=breakdown, recommendation=recommendation, pa_memo=pa_memo)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph Data (inspired by RxRefactor)
+# ---------------------------------------------------------------------------
+
+@router.get("/knowledge-graph")
+def get_knowledge_graph_data():
+    supabase = get_supabase_service()
+    coverages = supabase.list_drug_coverages()
+    nodes = {}
+    edges = []
+    for cov in coverages:
+        drug = cov.get("drug_name") or ""
+        payer = cov.get("payer") or ""
+        if not drug or not payer:
+            continue
+        drug_key = "drug:{0}".format(drug.lower())
+        if drug_key not in nodes:
+            nodes[drug_key] = {"id": drug_key, "label": drug, "type": "drug"}
+        payer_key = "payer:{0}".format(payer.lower())
+        if payer_key not in nodes:
+            nodes[payer_key] = {"id": payer_key, "label": payer, "type": "payer"}
+        edges.append({"source": drug_key, "target": payer_key, "label": cov.get("coverage_status", "unknown")})
+        for ind in (cov.get("covered_indications") or []):
+            ind_key = "ind:{0}".format(ind.lower()[:50])
+            if ind_key not in nodes:
+                nodes[ind_key] = {"id": ind_key, "label": ind[:50], "type": "indication"}
+            edges.append({"source": drug_key, "target": ind_key, "label": "treats"})
+    return {"nodes": list(nodes.values()), "edges": edges}

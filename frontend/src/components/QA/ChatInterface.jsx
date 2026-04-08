@@ -78,22 +78,29 @@ export default function ChatInterface() {
       .then(data => {
         const drugs = data || []
         const starters = []
-        // Find a drug with multiple payers
-        const multiPayer = drugs.find(d => d.payer_count > 1)
-        if (multiPayer) {
-          starters.push(`Which payers cover ${multiPayer.drug_name} and what are the key differences?`)
+        const templates = [
+          (d) => `Which payers cover ${d} and what are the key differences?`,
+          (d) => `What prior authorization criteria are required for ${d}?`,
+          (d) => `Does ${d} require step therapy? If so, what are the requirements?`,
+          (d) => `What are the site-of-care restrictions for ${d}?`,
+          (d) => `What biosimilars are available for ${d}?`,
+          (d) => `Compare ${d} coverage across all payers`,
+          (d) => `What quantity limits apply to ${d}?`,
+          (d) => `What indications are covered for ${d}?`,
+        ]
+        const generalQs = [
+          'Compare coverage restrictions across all payers in the system',
+          'Which drugs require step therapy across all payers?',
+          'What are the most restrictive prior auth policies?',
+          'Which drugs have the broadest indication coverage?',
+        ]
+        // Build dynamic starters from actual drugs
+        for (const drug of drugs.slice(0, 4)) {
+          const template = templates[starters.length % templates.length]
+          starters.push(template(drug.drug_name))
         }
-        // Pick first drug for PA question
-        if (drugs.length > 0) {
-          starters.push(`What prior authorization criteria are required for ${drugs[0].drug_name}?`)
-        }
-        // Pick another drug for step therapy
-        if (drugs.length > 1) {
-          starters.push(`Does ${drugs[1].drug_name} require step therapy?`)
-        }
-        // General comparison
-        starters.push('Compare coverage restrictions across all payers in the system')
-        setStarterQuestions(starters)
+        starters.push(...generalQs.slice(0, Math.max(1, 6 - starters.length)))
+        setStarterQuestions(starters.slice(0, 6))
       })
       .catch(() => {
         setStarterQuestions([

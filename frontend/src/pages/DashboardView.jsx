@@ -81,7 +81,18 @@ export default function DashboardView() {
   }
 
   const pollJob = (jobId) => {
+    let pollCount = 0
+    const MAX_POLLS = 200  // ~5 minutes at 1.5s intervals
     pollRef.current = setInterval(() => {
+      pollCount++
+      if (pollCount > MAX_POLLS) {
+        clearInterval(pollRef.current)
+        pollRef.current = null
+        setUploading(false)
+        setUploadStage(null)
+        setUploadError('Upload timed out. The document may still be processing — check back later.')
+        return
+      }
       getUploadJob(jobId)
         .then(job => {
           setUploadStage(job.stage || job.status)

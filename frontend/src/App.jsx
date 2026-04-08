@@ -6,9 +6,11 @@ import HeatmapView from './pages/HeatmapView'
 import PathwayView from './pages/PathwayView'
 import ReportView from './pages/ReportView'
 import PolicyTimeline from './components/Map/CoverageMap'
+import ApprovalView from './pages/ApprovalView'
+import GraphView from './pages/GraphView'
 
 const navLink = ({ isActive }) =>
-  `px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+  `px-3 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
     isActive
       ? 'bg-white/15 text-white'
       : 'theme-nav-link'
@@ -20,15 +22,17 @@ function App() {
       <div className="theme-shell">
         {/* Navigation */}
         <nav className="theme-nav flex items-center gap-1 px-6 py-3 overflow-x-auto">
-          <NavLink to="/" end className="theme-brand font-bold text-xl mr-6 transition-colors shrink-0">
+          <NavLink to="/" end className="theme-brand font-bold text-xl mr-4 transition-colors shrink-0">
             RxPulse
           </NavLink>
           <NavLink to="/" end className={navLink}>Dashboard</NavLink>
-          <NavLink to="/search" className={navLink}>Policy Search</NavLink>
-          <NavLink to="/matrix" className={navLink}>Coverage Matrix</NavLink>
-          <NavLink to="/pathway" className={navLink}>Coverage Pathway</NavLink>
+          <NavLink to="/search" className={navLink}>Search</NavLink>
+          <NavLink to="/matrix" className={navLink}>Matrix</NavLink>
+          <NavLink to="/pathway" className={navLink}>Pathway</NavLink>
+          <NavLink to="/approval" className={navLink}>Approval Score</NavLink>
           <NavLink to="/report" className={navLink}>Reports</NavLink>
-          <NavLink to="/changes" className={navLink}>Policy Changes</NavLink>
+          <NavLink to="/graph" className={navLink}>Graph</NavLink>
+          <NavLink to="/changes" className={navLink}>Changes</NavLink>
           <NavLink to="/ask" className={navLink}>AI Assistant</NavLink>
         </nav>
 
@@ -38,7 +42,9 @@ function App() {
           <Route path="/search" element={<SearchView />} />
           <Route path="/matrix" element={<HeatmapView />} />
           <Route path="/pathway" element={<PathwayView />} />
+          <Route path="/approval" element={<ApprovalView />} />
           <Route path="/report" element={<ReportView />} />
+          <Route path="/graph" element={<GraphView />} />
           <Route path="/changes" element={<PolicyTimeline />} />
           <Route path="/ask" element={<AskView />} />
         </Routes>
