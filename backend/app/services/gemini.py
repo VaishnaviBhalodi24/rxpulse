@@ -670,7 +670,7 @@ DOCUMENT B ({label_b}):
 
     def _build_url(self, model: str, method: str = "generateContent") -> str:
         if self.settings.use_vertex_ai:
-            return "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:{method}".format(
+            return "https://{region}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{region}/publishers/google/models/{model}:{method}".format(
                 region=self.settings.gcp_region,
                 project=self.settings.gcp_project_id,
                 model=model,
