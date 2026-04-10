@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getStats, getPolicyChanges, uploadPolicy, getUploadJob } from '../api'
+import { getStats, getPolicyChanges, uploadPolicySync } from '../api'
 
 const STAGE_LABELS = {
   queued: 'Queued',
@@ -30,7 +30,6 @@ export default function DashboardView() {
   const [uploadError, setUploadError] = useState('')
   const [uploadSuccess, setUploadSuccess] = useState('')
   const fileInputRef = useRef(null)
-  const pollRef = useRef(null)
 
   const [dragging, setDragging] = useState(false)
 
@@ -57,7 +56,7 @@ export default function DashboardView() {
 
   // Cleanup polling on unmount
   useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    return () => {}
   }, [])
 
   const s = stats || {}
@@ -80,68 +79,28 @@ export default function DashboardView() {
     }
   }
 
-  const pollJob = (jobId) => {
-    let pollCount = 0
-    const MAX_POLLS = 200  // ~5 minutes at 1.5s intervals
-    pollRef.current = setInterval(() => {
-      pollCount++
-      if (pollCount > MAX_POLLS) {
-        clearInterval(pollRef.current)
-        pollRef.current = null
-        setUploading(false)
-        setUploadStage(null)
-        setUploadError('Upload timed out. The document may still be processing — check back later.')
-        return
-      }
-      getUploadJob(jobId)
-        .then(job => {
-          setUploadStage(job.stage || job.status)
-          setUploadMessage(job.message || '')
-
-          if (job.status === 'completed') {
-            clearInterval(pollRef.current)
-            pollRef.current = null
-            setUploading(false)
-            setUploadStage(null)
-            setUploadFile(null)
-            const r = job.result
-            setUploadSuccess(
-              `${r?.payer || 'Policy'} — ${r?.drugs_extracted || 0} drug(s) extracted, ${r?.chunks_stored || 0} chunks indexed`
-            )
-            if (fileInputRef.current) fileInputRef.current.value = ''
-            fetchStats(payerFilter)
-            fetchChanges()
-          } else if (job.status === 'failed') {
-            clearInterval(pollRef.current)
-            pollRef.current = null
-            setUploading(false)
-            setUploadStage(null)
-            setUploadError(job.error || 'Upload failed')
-          }
-        })
-        .catch(() => {
-          // keep polling, transient error
-        })
-    }, 1500)
-  }
-
   const handleUpload = async () => {
     if (!uploadFile) return
     setUploading(true)
     setUploadError('')
     setUploadSuccess('')
-    setUploadStage('queued')
-    setUploadMessage('Uploading file...')
+    setUploadStage('extracting')
+    setUploadMessage('Processing PDF — this may take 1-2 minutes...')
 
     const formData = new FormData()
     formData.append('file', uploadFile)
 
     try {
-      const data = await uploadPolicy(formData)
-      const jobId = data.job_id
-      setUploadStage('starting')
-      setUploadMessage('Processing started...')
-      pollJob(jobId)
+      const data = await uploadPolicySync(formData)
+      setUploading(false)
+      setUploadStage(null)
+      setUploadFile(null)
+      setUploadSuccess(
+        `${data.payer || 'Policy'} — ${data.drugs_extracted || 0} drug(s) extracted, ${data.chunks_stored || 0} chunks indexed`
+      )
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      fetchStats(payerFilter)
+      fetchChanges()
     } catch (err) {
       setUploading(false)
       setUploadStage(null)

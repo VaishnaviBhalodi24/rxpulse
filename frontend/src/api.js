@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 
-const client = axios.create({ baseURL: API })
+const client = axios.create({ baseURL: API, timeout: 600000 })  // 10min timeout for sync uploads
 
 // ── Dashboard & Stats ──
 export const getStats = (params) => client.get('/stats', { params }).then(r => r.data)
